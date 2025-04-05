@@ -1,6 +1,5 @@
 """
 Reinforce: policy gradient alg. implementation
-# TODO: make it device agnostic
 """
 from pathlib import Path
 from argparse import ArgumentParser
@@ -12,6 +11,7 @@ from torch import Tensor
 import numpy as np
 import gymnasium as gym
 
+from utils import set_seed, get_device
 
 #------------- Arguments --------------------------
 parser = ArgumentParser()
@@ -24,7 +24,8 @@ ENV_NAME = "Acrobot-v1"
 LR = 1e-3
 GAMMA = 0.99
 EPISODES = 500
-SAVE_PATH = './checkpoints/reinforce.pth'
+SAVE_PATH = './checkpoints/'
+DEVICE = 'cpu' #get_device()
 #--------------------------------------------------
 
 class PolicyNetwork(nn.Module):
@@ -49,9 +50,11 @@ class ReinforceAgent:
         self.policy = PolicyNetwork(n_obs, n_act, n_hidden=128)
         self.optimizer = torch.optim.AdamW(self.policy.parameters(), lr=LR)
 
+        self.policy = self.policy.to(DEVICE)
+
     def select_action(self, state: np.ndarray) -> tuple[float, Tensor]:
         """returns: action and log prob"""
-        logits = self.policy(torch.from_numpy(state).unsqueeze(dim=0))
+        logits = self.policy(torch.from_numpy(state).unsqueeze(dim=0).to(DEVICE))
         probs = nn.functional.softmax(logits, dim=1)
         m = torch.distributions.Categorical(probs)
         action = m.sample()
@@ -66,14 +69,16 @@ class ReinforceAgent:
 
     def save_policy(self) -> None:
         """save current policy"""
-        path = Path(SAVE_PATH)
+        file_name = f"reinforce_{ENV_NAME}.pth"
+        path = Path(SAVE_PATH) / file_name
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(self.policy.state_dict(), f=path)
         print(f"model saved at {path}")
 
     def load_policy(self) -> None:
         """load policy from save path"""
-        path = Path(SAVE_PATH)
+        file_name = f"reinforce_{ENV_NAME}.pth"
+        path = Path(SAVE_PATH) / file_name
         if path.exists():
             self.policy.load_state_dict(torch.load(f=path))
             print(f"loaded policy from {path}")
@@ -87,7 +92,7 @@ def compute_returns(rewards: list[float]) -> Tensor:
     for r in reversed(rewards):
         G = r + GAMMA * G
         returns.insert(0, G)
-    return_tensor = torch.tensor(returns, dtype=torch.float32)
+    return_tensor = torch.tensor(returns, dtype=torch.float32).to(DEVICE)
     return return_tensor
 
 def run_train_loop() -> None:
@@ -97,6 +102,7 @@ def run_train_loop() -> None:
     n_act = env.action_space.n
     agent = ReinforceAgent(n_obs, n_act)
     agent.load_policy()
+    agent.policy.train()
 
     for episode in range(EPISODES):
 
@@ -112,7 +118,7 @@ def run_train_loop() -> None:
             action, log_prob = agent.select_action(state)
             next_state, reward, done, truncated, _ = env.step(action)
 
-            log_probs.append(log_prob)
+            log_probs.append(log_prob.to(DEVICE))
             rewards.append(reward)
 
             state = next_state
@@ -123,9 +129,10 @@ def run_train_loop() -> None:
         total_reward = sum(rewards)
         if episode % 20 == 0:
             print(f"Episode: {episode}, Total reward: {total_reward}")
-    
+
     agent.save_policy()
 
+@torch.no_grad()
 def eval_loop() -> None:
     """eval loop"""
     env = gym.make(ENV_NAME, render_mode="human")
@@ -133,24 +140,32 @@ def eval_loop() -> None:
     n_act = env.action_space.n
     agent = ReinforceAgent(n_obs, n_act)
     agent.load_policy()
+    agent.policy.eval()
 
-    state, _ = env.reset()
-    done, truncated = False, False
-    total_reward = 0.0
+    with torch.inference_mode():
 
-    while not done and not truncated:
+        state, _ = env.reset()
+        done, truncated = False, False
+        total_reward = 0.0
 
-        action, log_prob = agent.select_action(state)
-        state, reward, done, truncated, _ = env.step(action)
-        total_reward += reward
+        while not done and not truncated:
 
-    print(f"Evaluation: total reward: {total_reward}")
+            action, log_prob = agent.select_action(state)
+            state, reward, done, truncated, _ = env.step(action)
+            total_reward += reward
+
+        print(f"Evaluation: total reward: {total_reward}")
+
 
 def main():
     """main training loop"""
 
-    if args.train: run_train_loop()
-    if args.eval: eval_loop()
+    set_seed(42)
+
+    if args.train:
+        run_train_loop()
+    if args.eval:
+        eval_loop()
 
 if __name__ == "__main__":
     main()
